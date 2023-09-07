@@ -60,3 +60,4 @@ pub use self::soundfont_info::SoundFontInfo;
 pub use self::soundfont_version::SoundFontVersion;
 pub use self::synthesizer::Synthesizer;
 pub use self::synthesizer_settings::SynthesizerSettings;
+pub use self::channel::Channel;

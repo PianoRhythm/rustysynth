@@ -26,8 +26,7 @@ pub struct Synthesizer {
     preset_lookup: HashMap<i32, usize>,
     default_preset: usize,
 
-    channels: Vec<Channel>,
-
+    // channels: Vec<Channel>,
     voices: VoiceCollection,
 
     block_left: Vec<f32>,
@@ -82,10 +81,10 @@ impl Synthesizer {
             }
         }
 
-        let mut channels: Vec<Channel> = Vec::new();
-        for i in 0..Synthesizer::CHANNEL_COUNT {
-            channels.push(Channel::new(i == Synthesizer::PERCUSSION_CHANNEL));
-        }
+        // let mut channels: Vec<Channel> = Vec::new();
+        // for i in 0..Synthesizer::CHANNEL_COUNT {
+        //     channels.push(Channel::new(i == Synthesizer::PERCUSSION_CHANNEL));
+        // }
 
         let voices = VoiceCollection::new(settings);
 
@@ -111,7 +110,7 @@ impl Synthesizer {
             maximum_polyphony: settings.maximum_polyphony,
             preset_lookup,
             default_preset,
-            channels,
+            // channels,
             voices,
             block_left,
             block_right,
@@ -130,16 +129,23 @@ impl Synthesizer {
     /// * `command` - The type of the message.
     /// * `data1` - The first data part of the message.
     /// * `data2` - The second data part of the message.
-    pub fn process_midi_message(&mut self, channel: i32, command: i32, data1: i32, data2: i32) {
-        if !(0 <= channel && channel < self.channels.len() as i32) {
+    pub fn process_midi_message(
+        &mut self,
+        socket_id: Option<u32>,
+        channels: &mut Vec<Channel>,
+        channel: i32,
+        command: i32,
+        data1: i32,
+        data2: i32,
+    ) {
+        if !(0 <= channel && channel < channels.len() as i32) {
             return;
         }
 
-        let channel_info = &mut self.channels[channel as usize];
-
+        let channel_info = &mut channels[channel as usize];
         match command {
-            0x80 => self.note_off(channel, data1),       // Note Off
-            0x90 => self.note_on(channel, data1, data2), // Note On
+            0x80 => self.note_off(socket_id, channels, channel, data1), // Note Off
+            0x90 => self.note_on(socket_id, channels, channel, data1, data2), // Note On
             0xB0 => match data1 // Controller
             {
                 0x00 => channel_info.set_bank(data2), // Bank Selection
@@ -159,7 +165,7 @@ impl Synthesizer {
                 0x65 => channel_info.set_rpn_coarse(data2), // RPN Coarse
                 0x64 => channel_info.set_rpn_fine(data2), // RPN Fine
                 0x78 => self.note_off_all_channel(channel, true), // All Sound Off
-                0x79 => self.reset_all_controllers_channel(channel), // Reset All Controllers
+                0x79 => self.reset_all_controllers_channel(channels, channel), // Reset All Controllers
                 0x7B => self.note_off_all_channel(channel, false), // All Note Off
                 _ => (),
             },
@@ -175,13 +181,19 @@ impl Synthesizer {
     ///
     /// * `channel` - The channel of the note.
     /// * `key` - The key of the note.
-    pub fn note_off(&mut self, channel: i32, key: i32) {
-        if !(0 <= channel && channel < self.channels.len() as i32) {
+    pub fn note_off(
+        &mut self,
+        socket_id: Option<u32>,
+        channels: &Vec<Channel>,
+        channel: i32,
+        key: i32,
+    ) {
+        if !(0 <= channel && channel < channels.len() as i32) {
             return;
         }
 
         for voice in self.voices.get_active_voices().iter_mut() {
-            if voice.channel == channel && voice.key == key {
+            if voice.channel == channel && voice.key == key && voice.socket_id == socket_id {
                 voice.end();
             }
         }
@@ -194,17 +206,24 @@ impl Synthesizer {
     /// * `channel` - The channel of the note.
     /// * `key` - The key of the note.
     /// * `velocity` - The velocity of the note.
-    pub fn note_on(&mut self, channel: i32, key: i32, velocity: i32) {
+    pub fn note_on(
+        &mut self,
+        socket_id: Option<u32>,
+        channels: &Vec<Channel>,
+        channel: i32,
+        key: i32,
+        velocity: i32,
+    ) {
         if velocity == 0 {
-            self.note_off(channel, key);
+            self.note_off(socket_id, channels, channel, key);
             return;
         }
 
-        if !(0 <= channel && channel < self.channels.len() as i32) {
+        if !(0 <= channel && channel < channels.len() as i32) {
             return;
         }
 
-        let channel_info = &self.channels[channel as usize];
+        let channel_info = &channels[channel as usize];
 
         let preset_id = (channel_info.get_bank_number() << 16) | channel_info.get_patch_number();
 
@@ -237,6 +256,7 @@ impl Synthesizer {
                         let region_pair = RegionPair::new(preset_region, instrument_region);
 
                         if let Some(value) = self.voices.request_new(instrument_region, channel) {
+                            value.socket_id = socket_id;
                             value.start(&region_pair, channel, key, velocity)
                         }
                     }
@@ -283,8 +303,8 @@ impl Synthesizer {
     }
 
     /// Resets all the controllers.
-    pub fn reset_all_controllers(&mut self) {
-        for channel in &mut self.channels {
+    pub fn reset_all_controllers(&mut self, channels: &mut Vec<Channel>) {
+        for channel in channels {
             channel.reset_all_controllers();
         }
     }
@@ -294,19 +314,19 @@ impl Synthesizer {
     /// # Arguments
     ///
     /// * `channel` - The channel to be reset.
-    pub fn reset_all_controllers_channel(&mut self, channel: i32) {
-        if !(0 <= channel && channel < self.channels.len() as i32) {
+    pub fn reset_all_controllers_channel(&mut self, channels: &mut Vec<Channel>, channel: i32) {
+        if !(0 <= channel && channel < channels.len() as i32) {
             return;
         }
 
-        self.channels[channel as usize].reset_all_controllers();
+        channels[channel as usize].reset_all_controllers();
     }
 
     /// Resets the synthesizer.
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, channels: &mut Vec<Channel>) {
         self.voices.clear();
 
-        for channel in &mut self.channels {
+        for channel in channels {
             channel.reset();
         }
 
@@ -328,7 +348,7 @@ impl Synthesizer {
     /// # Remarks
     ///
     /// The output buffers for the left and right must be the same length.
-    pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+    pub fn render(&mut self, left: &mut [f32], right: &mut [f32], channels: &Vec<&Channel>) {
         if left.len() != right.len() {
             panic!("The output buffers for the left and right must be the same length.");
         }
@@ -338,7 +358,7 @@ impl Synthesizer {
         let mut wrote = 0;
         while wrote < left_length {
             if self.block_read == self.block_size {
-                self.render_block();
+                self.render_block(channels);
                 self.block_read = 0;
             }
 
@@ -356,9 +376,8 @@ impl Synthesizer {
         }
     }
 
-    fn render_block(&mut self) {
-        self.voices
-            .process(&self.sound_font.wave_data, &self.channels);
+    fn render_block(&mut self, channels: &Vec<&Channel>) {
+        self.voices.process(&self.sound_font.wave_data, channels);
 
         for t in 0..self.block_size {
             self.block_left[t] = 0_f32;

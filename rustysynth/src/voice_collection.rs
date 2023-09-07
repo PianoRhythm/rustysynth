@@ -69,7 +69,7 @@ impl VoiceCollection {
         Some(&mut self.voices[candidate])
     }
 
-    pub(crate) fn process(&mut self, data: &[i16], channels: &[Channel]) {
+    pub(crate) fn process(&mut self, data: &[i16], channels: &[&Channel]) {
         let mut i: usize = 0;
 
         loop {

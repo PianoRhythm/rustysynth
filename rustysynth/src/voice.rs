@@ -75,11 +75,13 @@ pub(crate) struct Voice {
     voice_state: i32,
     pub(crate) voice_length: usize,
     min_voice_length: usize,
+    pub socket_id: Option<u32>,
 }
 
 impl Voice {
     pub(crate) fn new(settings: &SynthesizerSettings) -> Self {
         Self {
+            socket_id: None,
             sample_rate: settings.sample_rate,
             block_size: settings.block_size,
             vol_env: VolumeEnvelope::new(settings),
@@ -181,98 +183,107 @@ impl Voice {
 
     pub(crate) fn kill(&mut self) {
         self.note_gain = 0_f32;
+        self.socket_id = None;
     }
 
-    pub(crate) fn process(&mut self, data: &[i16], channels: &[Channel]) -> bool {
+    pub(crate) fn process(&mut self, data: &[i16], channels: &[&Channel]) -> bool {
         if self.note_gain < SoundFontMath::NON_AUDIBLE {
             return false;
         }
 
-        let channel_info = &channels[self.channel as usize];
+        if let Some(channel_info) = channels.iter().find(|v| {
+            v.socket_id.is_some()
+                && v.socket_id == self.socket_id
+                && v.channel_id == self.channel as usize
+        }) {
+            self.release_if_necessary(&channel_info);
 
-        self.release_if_necessary(channel_info);
+            if !self.vol_env.process(self.block_size) {
+                return false;
+            }
 
-        if !self.vol_env.process(self.block_size) {
-            return false;
-        }
+            self.mod_env.process(self.block_size);
+            self.vib_lfo.process();
+            self.mod_lfo.process();
 
-        self.mod_env.process(self.block_size);
-        self.vib_lfo.process();
-        self.mod_lfo.process();
+            let vib_pitch_change = (0.01_f32 * channel_info.get_modulation()
+                + self.vib_lfo_to_pitch)
+                * self.vib_lfo.get_value();
+            let mod_pitch_change = self.mod_lfo_to_pitch * self.mod_lfo.get_value()
+                + self.mod_env_to_pitch * self.mod_env.get_value();
+            let channel_pitch_change = channel_info.get_tune() + channel_info.get_pitch_bend();
+            let pitch =
+                self.key as f32 + vib_pitch_change + mod_pitch_change + channel_pitch_change;
+            if !self.oscillator.process(data, &mut self.block[..], pitch) {
+                return false;
+            }
 
-        let vib_pitch_change = (0.01_f32 * channel_info.get_modulation() + self.vib_lfo_to_pitch)
-            * self.vib_lfo.get_value();
-        let mod_pitch_change = self.mod_lfo_to_pitch * self.mod_lfo.get_value()
-            + self.mod_env_to_pitch * self.mod_env.get_value();
-        let channel_pitch_change = channel_info.get_tune() + channel_info.get_pitch_bend();
-        let pitch = self.key as f32 + vib_pitch_change + mod_pitch_change + channel_pitch_change;
-        if !self.oscillator.process(data, &mut self.block[..], pitch) {
-            return false;
-        }
+            if self.dynamic_cutoff {
+                let cents = self.mod_lfo_to_cutoff as f32 * self.mod_lfo.get_value()
+                    + self.mod_env_to_cutoff as f32 * self.mod_env.get_value();
+                let factor = SoundFontMath::cents_to_multiplying_factor(cents);
+                let new_cutoff = factor * self.cutoff;
 
-        if self.dynamic_cutoff {
-            let cents = self.mod_lfo_to_cutoff as f32 * self.mod_lfo.get_value()
-                + self.mod_env_to_cutoff as f32 * self.mod_env.get_value();
-            let factor = SoundFontMath::cents_to_multiplying_factor(cents);
-            let new_cutoff = factor * self.cutoff;
+                // The cutoff change is limited within x0.5 and x2 to reduce pop noise.
+                let lower_limit = 0.5_f32 * self.smoothed_cutoff;
+                let upper_limit = 2_f32 * self.smoothed_cutoff;
+                self.smoothed_cutoff = SoundFontMath::clamp(new_cutoff, lower_limit, upper_limit);
 
-            // The cutoff change is limited within x0.5 and x2 to reduce pop noise.
-            let lower_limit = 0.5_f32 * self.smoothed_cutoff;
-            let upper_limit = 2_f32 * self.smoothed_cutoff;
-            self.smoothed_cutoff = SoundFontMath::clamp(new_cutoff, lower_limit, upper_limit);
+                self.filter
+                    .set_low_pass_filter(self.smoothed_cutoff, self.resonance);
+            }
+            self.filter.process(&mut self.block[..]);
 
-            self.filter
-                .set_low_pass_filter(self.smoothed_cutoff, self.resonance);
-        }
-        self.filter.process(&mut self.block[..]);
-
-        self.previous_mix_gain_left = self.current_mix_gain_left;
-        self.previous_mix_gain_right = self.current_mix_gain_right;
-        self.previous_reverb_send = self.current_reverb_send;
-        self.previous_chorus_send = self.current_chorus_send;
-
-        // According to the GM spec, the following value should be squared.
-        let ve = channel_info.get_volume() * channel_info.get_expression();
-        let channel_gain = ve * ve;
-
-        let mut mix_gain = self.note_gain * channel_gain * self.vol_env.get_value();
-        if self.dynamic_volume {
-            let decibels = self.mod_lfo_to_volume * self.mod_lfo.get_value();
-            mix_gain *= SoundFontMath::decibels_to_linear(decibels);
-        }
-
-        let angle =
-            (consts::PI / 200_f32) * (channel_info.get_pan() + self.instrument_pan + 50_f32);
-        if angle <= 0_f32 {
-            self.current_mix_gain_left = mix_gain;
-            self.current_mix_gain_right = 0_f32;
-        } else if angle >= SoundFontMath::HALF_PI {
-            self.current_mix_gain_left = 0_f32;
-            self.current_mix_gain_right = mix_gain;
-        } else {
-            self.current_mix_gain_left = mix_gain * angle.cos();
-            self.current_mix_gain_right = mix_gain * angle.sin();
-        }
-
-        self.current_reverb_send = SoundFontMath::clamp(
-            channel_info.get_reverb_send() + self.instrument_reverb,
-            0_f32,
-            1_f32,
-        );
-        self.current_chorus_send = SoundFontMath::clamp(
-            channel_info.get_chorus_send() + self.instrument_chorus,
-            0_f32,
-            1_f32,
-        );
-
-        if self.voice_length == 0 {
             self.previous_mix_gain_left = self.current_mix_gain_left;
             self.previous_mix_gain_right = self.current_mix_gain_right;
             self.previous_reverb_send = self.current_reverb_send;
             self.previous_chorus_send = self.current_chorus_send;
-        }
 
-        self.voice_length += self.block_size;
+            // According to the GM spec, the following value should be squared.
+            let ve = channel_info.get_volume() * channel_info.get_expression();
+            let channel_gain = ve * ve;
+
+            let mut mix_gain = self.note_gain * channel_gain * self.vol_env.get_value();
+            if self.dynamic_volume {
+                let decibels = self.mod_lfo_to_volume * self.mod_lfo.get_value();
+                mix_gain *= SoundFontMath::decibels_to_linear(decibels);
+            }
+
+            let angle =
+                (consts::PI / 200_f32) * (channel_info.get_pan() + self.instrument_pan + 50_f32);
+            if angle <= 0_f32 {
+                self.current_mix_gain_left = mix_gain;
+                self.current_mix_gain_right = 0_f32;
+            } else if angle >= SoundFontMath::HALF_PI {
+                self.current_mix_gain_left = 0_f32;
+                self.current_mix_gain_right = mix_gain;
+            } else {
+                self.current_mix_gain_left = mix_gain * angle.cos();
+                self.current_mix_gain_right = mix_gain * angle.sin();
+            }
+
+            self.current_reverb_send = SoundFontMath::clamp(
+                channel_info.get_reverb_send() + self.instrument_reverb,
+                0_f32,
+                1_f32,
+            );
+            self.current_chorus_send = SoundFontMath::clamp(
+                channel_info.get_chorus_send() + self.instrument_chorus,
+                0_f32,
+                1_f32,
+            );
+
+            if self.voice_length == 0 {
+                self.previous_mix_gain_left = self.current_mix_gain_left;
+                self.previous_mix_gain_right = self.current_mix_gain_right;
+                self.previous_reverb_send = self.current_reverb_send;
+                self.previous_chorus_send = self.current_chorus_send;
+            }
+
+            self.voice_length += self.block_size;
+        } else {
+            return false;
+        }
 
         true
     }

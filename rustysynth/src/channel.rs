@@ -1,17 +1,19 @@
 #![allow(dead_code)]
 
 #[non_exhaustive]
-pub(crate) struct Channel {
+// #[derive(Clone, Debug)]
+#[derive(Debug)]
+pub struct Channel {
     pub(crate) is_percussion_channel: bool,
 
-    bank_number: i32,
-    patch_number: i32,
+    pub bank_number: i32,
+    pub patch_number: i32,
 
     modulation: i16,
-    volume: i16,
-    pan: i16,
-    expression: i16,
-    hold_pedal: bool,
+    pub volume: i16,
+    pub pan: i16,
+    pub expression: i16,
+    pub hold_pedal: bool,
 
     reverb_send: u8,
     chorus_send: u8,
@@ -22,10 +24,12 @@ pub(crate) struct Channel {
     fine_tune: i16,
 
     pitch_bend: f32,
+    pub socket_id: Option<u32>,
+    pub channel_id: usize,
 }
 
 impl Channel {
-    pub(crate) fn new(is_percussion_channel: bool) -> Self {
+    pub fn new(is_percussion_channel: bool) -> Self {
         let mut channel = Self {
             is_percussion_channel,
             bank_number: 0,
@@ -42,6 +46,8 @@ impl Channel {
             coarse_tune: 0,
             fine_tune: 0,
             pitch_bend: 0_f32,
+            socket_id: None,
+            channel_id: 0,
         };
 
         channel.reset();

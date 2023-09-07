@@ -59,13 +59,13 @@ impl MidiFileSequencer {
         self.msg_index = 0;
         self.loop_index = 0;
 
-        self.synthesizer.reset()
+        self.synthesizer.reset(&mut vec![])
     }
 
     /// Stops playing.
     pub fn stop(&mut self) {
         self.midi_file = None;
-        self.synthesizer.reset();
+        self.synthesizer.reset(&mut vec![]);
     }
 
     /// Renders the waveform.
@@ -97,10 +97,11 @@ impl MidiFileSequencer {
             let dst_rem = left_length - wrote;
             let rem = cmp::min(src_rem, dst_rem);
 
-            self.synthesizer.render(
-                &mut left[wrote..wrote + rem],
-                &mut right[wrote..wrote + rem],
-            );
+            // self.synthesizer.render(
+            //     &mut left[wrote..wrote + rem],
+            //     &mut right[wrote..wrote + rem],
+            //     &vec![],
+            // );
 
             self.block_wrote += rem;
             wrote += rem;
@@ -119,12 +120,13 @@ impl MidiFileSequencer {
 
             if time <= self.current_time {
                 if msg.get_message_type() == Message::NORMAL {
-                    self.synthesizer.process_midi_message(
-                        msg.channel as i32,
-                        msg.command as i32,
-                        msg.data1 as i32,
-                        msg.data2 as i32,
-                    );
+                    // self.synthesizer.process_midi_message(
+                    //     vec![],
+                    //     msg.channel as i32,
+                    //     msg.command as i32,
+                    //     msg.data1 as i32,
+                    //     msg.data2 as i32,
+                    // );
                 } else if self.play_loop {
                     if msg.get_message_type() == Message::LOOP_START {
                         self.loop_index = self.msg_index;
